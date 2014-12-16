@@ -1,28 +1,35 @@
+/*
+    Copyright (c) 2014 Orson Peters
+
+    This software is provided 'as-is', without any express or implied warranty. In no event will the
+    authors be held liable for any damages arising from the use of this software.
+
+    Permission is granted to anyone to use this software for any purpose, including commercial
+    applications, and to alter it and redistribute it freely, subject to the following restrictions:
+
+    1. The origin of this software must not be misrepresented; you must not claim that you wrote the
+       original software. If you use this software in a product, an acknowledgement in the product
+       documentation would be appreciated but is not required.
+    2. Altered source versions must be plainly marked as such, and must not be misrepresented as
+       being the original software.
+    3. This notice may not be removed or altered from any source distribution.
+*/
+
+
 #ifndef DEVECTOR_H
 #define DEVECTOR_H
 
+// TODO: Include what you use.
 #include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 
-/*
-    Implementation notes.
 
-    May throw exceptions:
-        Allocator default construction.
-        All value_type constructors.
-        Allocation.
 
-    May not throw exceptions mandated by the standard:
-        Allocator copy/move construction.
-        All alloc_traits::(const_)pointer operations.
-        value_type destructor.
-        Deallocation.
-
-    Valid moved-from state: impl.null().
-*/
-
+// There is an issue with std::swap. It uses a recursive noexcept declaration for multidimensional
+// arrays, but those do not work. This code defines detail::is_nothrow_swappable to solve that.
+// http://stackoverflow.com/questions/26793979/why-is-swapping-multidimensional-arrays-not-noexcept
 namespace detail {
     namespace swap_adl_tests {
         // If swap ADL finds this then it would call std::swap otherwise (same signature).
@@ -88,6 +95,7 @@ template<class T, class Allocator = std::allocator<T>>
 class devector {
 private:
     typedef std::allocator_traits<Allocator> alloc_traits;
+    typedef devector<T, Allocator> V;
 
 public:
     // Typedefs.
@@ -120,14 +128,14 @@ public:
     explicit devector(size_type n, const Allocator& alloc = Allocator()) : impl(alloc) {
         impl.begin_storage = impl.begin_cursor = alloc_traits::allocate(impl, n);
         impl.end_storage = impl.end_cursor = impl.begin_storage + n;
-        try { uninitialized_fill(impl.begin_cursor, impl.end_cursor); }
+        try { strong_uninitialized_fill(impl.begin_cursor, impl.end_cursor); }
         catch (...) { deallocate(); throw; }
     }
 
     devector(size_type n, const T& value, const Allocator& alloc = Allocator()) : impl(alloc) {
         impl.begin_storage = impl.begin_cursor = alloc_traits::allocate(impl, n);
         impl.end_storage = impl.end_cursor = impl.begin_storage + n;
-        try { uninitialized_fill(impl.begin_cursor, impl.end_cursor, value); }
+        try { strong_uninitialized_fill(impl.begin_cursor, impl.end_cursor, value); }
         catch (...) { deallocate(); throw; }
     }
 
@@ -137,16 +145,16 @@ public:
         init_range(first, last, typename std::iterator_traits<InputIterator>::iterator_category());
     }
 
-    devector(const devector<T, Allocator>& other)
+    devector(const V& other)
     : impl(alloc_traits::select_on_container_copy_construction(other.impl)) {
         init_range(other.begin(), other.end(), std::random_access_iterator_tag());
     }
 
-    devector(const devector<T, Allocator>& other, const Allocator& alloc) : impl(alloc) {
+    devector(const V& other, const Allocator& alloc) : impl(alloc) {
         init_range(other.begin(), other.end(), std::random_access_iterator_tag());
     }
 
-    devector(devector<T, Allocator>&& other) noexcept : impl(std::move(other.impl)) {
+    devector(V&& other) noexcept : impl(std::move(other.impl)) {
         impl.begin_storage = std::move(other.impl.begin_storage);
         impl.end_storage = std::move(other.impl.end_storage);
         impl.begin_cursor = std::move(other.impl.begin_cursor);
@@ -154,7 +162,7 @@ public:
         other.impl.null();
     }
 
-    devector(devector<T, Allocator>&& other, const Allocator& alloc) : impl(alloc) {
+    devector(V&& other, const Allocator& alloc) : impl(alloc) {
         if (impl.alloc() == other.impl.alloc()) {
             impl.begin_storage = std::move(other.impl.begin_storage);
             impl.end_storage = std::move(other.impl.end_storage);
@@ -174,7 +182,7 @@ public:
         init_range(il.begin(), il.end(), std::random_access_iterator_tag());
     }
 
-    devector<T, Allocator>& operator=(const devector<T, Allocator>& other) {
+    V& operator=(const V& other) {
         if (this != &other) {
             copy_assign_propagate_dispatcher(
                 other,
@@ -187,7 +195,7 @@ public:
         return *this;
     }
 
-    devector<T, Allocator>& operator=(devector<T, Allocator>&& other)
+    V& operator=(V&& other)
     noexcept(alloc_traits::propagate_on_container_move_assignment::value) {
         if (this != &other) {
             move_assign_propagate_dispatcher(
@@ -201,7 +209,7 @@ public:
         return *this;
     }
 
-    devector<T, Allocator>& operator=(std::initializer_list<T> il) { assign(il); return *this; }
+    V& operator=(std::initializer_list<T> il) { assign(il); return *this; }
 
     template<class InputIterator>
     typename std::enable_if<
@@ -248,90 +256,78 @@ public:
     size_type capacity_front() const noexcept { return impl.end_cursor  - impl.begin_storage; }
     size_type capacity_back()  const noexcept { return impl.end_storage - impl.begin_cursor; }
 
-    void resize(size_type n) {
+    void resize(size_type n) { resize_back(n); }
+    void resize(size_type n, const T& t) { resize_back(n, t); }
+
+    void resize_back(size_type n) {
+        // FIXME: no effects on exception
         reserve(n);
         while (n < size()) pop_back();
         while (n > size()) emplace_back();
     }
 
-    void resize(size_type n, const T& t) {
+    void resize_back(size_type n, const T& t) {
+        // FIXME: no effects on exception
         reserve(n);
         while (n < size()) pop_back();
         while (n > size()) emplace_back(t);
     }
+    
+    void resize_front(size_type n);
+    void resize_front(size_type n, const T& t);
 
     void reserve(size_type n) { reserve_back(n); }
 
-    // CORRECT MARKER
+    void reserve(size_type new_front, size_type new_back) {
+        if (new_front > max_size() || new_back > max_size()) {
+            throw std::length_error("devector");
+        }
+
+        if (capacity_front() >= new_front && capacity_back() >= new_back) return;
+
+        reallocate(new_front - size(), new_back - size());
+    }
 
     void reserve_front(size_type n) {
         if (n > max_size()) throw std::length_error("devector");
-        if (capacity() < n) {
-            pointer new_storage;
-            try { new_storage = alloc_traits::allocate(impl, n); } catch(...) { return; }
+        if (capacity_front() >= n) return;
 
-            // TODO: strong exception guarantee
-            uninitialized_copy(std::move_iterator<iterator>(begin()),
-                             std::move_iterator<iterator>(end()), new_storage + (n - size()));
-
-            destruct();
-            impl.begin_storage = impl.begin_cursor = new_storage;
-            impl.end_storage = impl.end_cursor = new_storage + n;
-        }
+        reallocate(n - size(), impl.end_storage - impl.end_cursor);
     }
 
     void reserve_back(size_type n) {
         if (n > max_size()) throw std::length_error("devector");
-        if (capacity() < n) {
-            pointer new_storage;
-            try { new_storage = alloc_traits::allocate(impl, n); } catch(...) { return; }
+        if (capacity_back() >= n) return;
 
-            // TODO: strong exception guarantee
-            uninitialized_copy(std::move_iterator<iterator>(begin()),
-                             std::move_iterator<iterator>(end()), new_storage);
-
-            destruct();
-            impl.begin_storage = impl.begin_cursor = new_storage;
-            impl.end_storage = impl.end_cursor = new_storage + n;
-        }
+        reallocate(impl.begin_cursor - impl.begin_storage, n - size());
     }
 
     void shrink_to_fit() {
+        // FIXME: no effects on exception
         size_type n = size();
-        if (capacity() > n && n > 0) {
-            pointer new_storage;
-            try { new_storage = alloc_traits::allocate(impl, n); } catch(...) { return; }
-
-            // TODO: strong exception guarantee
-            uninitialized_copy(std::move_iterator<iterator>(begin()),
-                             std::move_iterator<iterator>(end()), new_storage);
-
-            clear();
-            impl.begin_storage = impl.begin_cursor = new_storage;
-            impl.end_storage = impl.end_cursor = new_storage + n;
-        }
+        if (capacity() > n && n > 0) reallocate(0, 0);
     }
 
     bool empty() const noexcept { return impl.begin_cursor == impl.end_cursor; }
 
     // Indexing.
-    reference         operator[](size_type i)       { return impl.begin_cursor[i]; }
-    const_reference   operator[](size_type i) const { return impl.begin_cursor[i]; }
+    reference       operator[](size_type i)       noexcept { return impl.begin_cursor[i]; }
+    const_reference operator[](size_type i) const noexcept { return impl.begin_cursor[i]; }
 
-    reference         at(size_type i) {
+    reference at(size_type i) {
         if (i >= size()) throw std::out_of_range("devector");
         return (*this)[i];
     }
 
-    const_reference   at(size_type i) const {
+    const_reference at(size_type i) const {
         if (i >= size()) throw std::out_of_range("devector");
         return (*this)[i];
     }
 
-    reference         front()                { return *begin(); }
-    const_reference   front() const          { return *begin(); }
-    reference         back()                 { return *(end() - 1); }
-    const_reference   back()  const          { return *(end() - 1); }
+    reference         front()       noexcept { return *begin(); }
+    const_reference   front() const noexcept { return *begin(); }
+    reference         back()        noexcept { return *(end() - 1); }
+    const_reference   back()  const noexcept { return *(end() - 1); }
     T*                data()        noexcept { return std::addressof(front()); }
     const T*          data()  const noexcept { return std::addressof(front()); }
 
@@ -347,39 +343,59 @@ public:
     template<class... Args>
     void emplace_front(Args&&... args) {
         if (impl.begin_cursor == impl.begin_storage) req_storage_front();
-        alloc_traits::construct(impl, std::addressof(*--impl.begin_cursor),
+        alloc_traits::construct(impl, std::addressof(*(begin() - 1)),
                                 std::forward<Args>(args)...);
+        --impl.begin_cursor; // We do this after constructing for strong exception safety.
     }
 
     template<class... Args>
     void emplace_back(Args&&... args) {
         if (impl.end_cursor == impl.end_storage) req_storage_back();
-        alloc_traits::construct(impl, std::addressof(*impl.end_cursor++),
+        alloc_traits::construct(impl, std::addressof(*end()),
                                 std::forward<Args>(args)...);
+        ++impl.end_cursor; // We do this after constructing for strong exception safety.
     }
 
+    // CORRECT MARKER
+
+    // There is no standards-compliant way of implementing an efficient emplace and insert
     template<class... Args>
     iterator emplace(const_iterator position, Args&&... args) {
         // TODO: move to unitialized memory broken
         // TODO: strong exception guarantee
-        if (position - begin() < end() - position) {
+        difference_type dist_front = position - begin();
+        difference_type dist_back = end() - position;
+
+        if (dist_front < dist_back) {
+            // TODO: do not move data twice
             if (impl.begin_cursor == impl.begin_storage) req_storage_front();
-            alloc_traits::construct(impl, std::addressof(*(begin() - 1)), std::move(front()));
-            std::move(begin(), position, begin() - 1);
+
+            if (dist_front == 0) {
+                alloc_traits::construct(impl, std::addressof(*(begin() - 1)),
+                                        std::forward<Args>(args)...);
+            } else {
+                T tmp(std::forward<Args>(args)...);
+
+                try {
+                    alloc_traits::construct(impl, std::addressof(*(begin() - 1)),
+                                            std::move_if_noexcept(front()));
+                } catch (...) {
+                    alloc_traits::destroy(impl, std::addressof(*(begin() - 1)));
+                    throw;
+                }
+
+
+            }
+
             --impl.begin_cursor;
         } else {
-            if (impl.end_cursor == impl.end_storage) req_storage_back();
-            std::move_backward(position, end(), end() + 1);
-            impl.end_cursor++;
         }
 
-        alloc_traits::construct(impl, std::addressof(*position), std::forward<Args>(args)...);
-
         // const_iterator to iterator
-        return begin() + (position - begin());
+        return begin() + dist_front;
     }
 
-    iterator insert(const_iterator position, const T& t) { return  emplace(position, t); }
+    iterator insert(const_iterator position, const T& t) { return emplace(position, t); }
     iterator insert(const_iterator position, T&& t) { return emplace(position, std::move(t)); }
     iterator insert(const_iterator position, size_type n, const T& t);
 
@@ -388,7 +404,12 @@ public:
     }
     
     template<class InputIterator>
-    iterator insert(const_iterator position, InputIterator first, InputIterator last);
+    typename std::enable_if<
+        std::is_base_of<
+            std::input_iterator_tag,
+            typename std::iterator_traits<InputIterator>::iterator_category
+        >::value,
+    iterator>::type insert(const_iterator position, InputIterator first, InputIterator last);
 
     iterator erase(const_iterator position) { return erase(position, position + 1); }
 
@@ -407,7 +428,7 @@ public:
         return begin() + retpos;
     }
 
-    void swap(devector<T, Allocator>& other)
+    void swap(V& other)
     noexcept(!alloc_traits::propagate_on_container_swap::value ||
              detail::is_nothrow_swappable<Allocator>::value) {
         using std::swap;
@@ -422,9 +443,11 @@ public:
         swap(impl.end_cursor, other.impl.end_cursor);
     }
 
-    void clear() { clear_back(); }
-    void clear_back() { while (begin() != end()) pop_back(); }
-    void clear_front() { while (begin() != end()) pop_front(); }
+    void clear() noexcept {
+        while (begin() != end()) {
+            try { pop_back(); } catch (...) { }
+        }
+    }
 
 private:
     // Empty base class optimization.
@@ -464,10 +487,27 @@ private:
         deallocate();
     }
 
+    // Reallocate with space_front free space in the front, and space_back in the back.
+    void reallocate(size_type space_front, size_type space_back) {
+        size_type alloc_size = space_front + size() + space_back;
+
+        pointer new_storage = alloc_traits::allocate(impl, alloc_size);
+        pointer new_begin_cursor = new_storage + space_front;
+
+        try { strong_uninitialized_move(begin(), end(), new_begin_cursor); }
+        catch (...) { alloc_traits::deallocate(impl, new_storage, alloc_size); throw; }
+
+        destruct();
+        impl.begin_storage = new_storage;
+        impl.end_storage = new_storage + alloc_size;
+        impl.begin_cursor = new_begin_cursor;
+        impl.end_cursor = impl.end_storage - space_back;
+    }
+
     // Fills first, last with constructed elements with args. Strong exception guarantee, cleans up
     // if an exception occurs.
     template<class... Args>
-    pointer uninitialized_fill(pointer first, pointer last, Args&&... args) {
+    pointer strong_uninitialized_fill(pointer first, pointer last, Args&&... args) {
         pointer current = first;
 
         try {
@@ -485,7 +525,7 @@ private:
     // Copies from the range [first, last) into the uninitialized range starting at d_first. Strong
     // exception guarantee, cleans up if an exception occurs.
     template<class InputIterator>
-    pointer uninitialized_copy(InputIterator first, InputIterator last, pointer d_first) {
+    pointer strong_uninitialized_copy(InputIterator first, InputIterator last, pointer d_first) {
         pointer current = d_first;
 
         try {
@@ -503,7 +543,7 @@ private:
     // Moves from the range [first, last) into the uninitialized range starting at d_first. Strong
     // exception guarantee, cleans up if an exception occurs.
     template<class InputIterator>
-    pointer uninitialized_move(InputIterator first, InputIterator last, pointer d_first) {
+    pointer strong_uninitialized_move(InputIterator first, InputIterator last, pointer d_first) {
         pointer current = d_first;
 
         try {
@@ -529,7 +569,7 @@ private:
         if (n > 0) {
             impl.begin_storage = impl.begin_cursor = alloc_traits::allocate(impl, n);
             impl.end_storage = impl.end_cursor = impl.begin_storage + n;
-            uninitialized_copy(first, last, impl.begin_cursor);
+            strong_uninitialized_copy(first, last, impl.begin_cursor);
         }
     }
 
@@ -561,7 +601,7 @@ private:
 
     // Helper functions for move assignment. Second argument is 
     // alloc_traits::propagate_on_container_move_assignment::value.
-    void move_assign_propagate_dispatcher(devector<T, Allocator>&& other, std::true_type) noexcept {
+    void move_assign_propagate_dispatcher(V&& other, std::true_type) noexcept {
         destruct();
         impl.alloc() = std::move(other.impl.alloc());
         impl.begin_storage = std::move(other.impl.begin_storage);
@@ -571,7 +611,7 @@ private:
         other.impl.null();
     }
 
-    void move_assign_propagate_dispatcher(devector<T, Allocator>&& other, std::false_type) {
+    void move_assign_propagate_dispatcher(V&& other, std::false_type) {
         if (impl.alloc() != other.impl.alloc()) {
             destruct();
             impl.null();
@@ -586,7 +626,7 @@ private:
     
     // Helper functions for copy assignment. Second argument is 
     // alloc_traits::propagate_on_container_copy_assignment::value.
-    void copy_assign_propagate_dispatcher(const devector<T, Allocator>& other, std::true_type) {
+    void copy_assign_propagate_dispatcher(const V& other, std::true_type) {
         if (impl.alloc() != other.impl.alloc()) {
             destruct();
             impl.null();
@@ -596,7 +636,7 @@ private:
         assign(other.begin(), other.end());
     }
 
-    void copy_assign_propagate_dispatcher(const devector<T, Allocator>& other, std::false_type) {
+    void copy_assign_propagate_dispatcher(const V& other, std::false_type) {
         assign(other.begin(), other.end());
     }
 };
@@ -639,5 +679,23 @@ noexcept(noexcept(lhs.swap(rhs))) {
     lhs.swap(rhs);
 }
 
+/*
+    Implementation notes.
+
+    May throw exceptions:
+        Allocator default construction.
+        All value_type constructors.
+        Allocation.
+
+    May not throw exceptions mandated by the standard:
+        Allocator copy/move construction.
+        All alloc_traits::(const_)pointer operations.
+        Deallocation.
+        
+    May throw exceptions but makes effects undefined:
+        value_type destructor.
+
+    Valid moved-from state: impl.null().
+*/
 
 #endif
