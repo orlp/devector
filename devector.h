@@ -263,17 +263,12 @@ public:
         auto original_size = size();
 
         reserve_back(n);
-        while (n < size()) {
-            try { pop_back(); } catch (...) { }
-        }
+        while (n < size()) pop_back();
 
         try {
             while (n > size()) emplace_back();
         } catch (...) {
-            while (original_size < size()) {
-                try { pop_back(); } catch (...) { }
-            }
-
+            while (original_size < size()) pop_back();
             throw;
         }
     }
@@ -282,17 +277,12 @@ public:
         auto original_size = size();
 
         reserve_back(n);
-        while (n < size()) {
-            try { pop_back(); } catch (...) { }
-        }
+        while (n < size()) pop_back();
 
         try {
             while (n > size()) emplace_back(t);
         } catch (...) {
-            while (original_size < size()) {
-                try { pop_back(); } catch (...) { }
-            }
-
+            while (original_size < size()) pop_back();
             throw;
         }
     }
@@ -301,22 +291,29 @@ public:
         auto original_size = size();
 
         reserve_back(n);
-        while (n < size()) {
-            try { pop_front(); } catch (...) { }
-        }
+        while (n < size()) pop_front();
 
         try {
             while (n > size()) emplace_front();
         } catch (...) {
-            while (original_size < size()) {
-                try { pop_front(); } catch (...) { }
-            }
-
+            while (original_size < size()) pop_front();
             throw;
         }
     }
 
-    void resize_front(size_type n, const T& t);
+    void resize_front(size_type n, const T& t) {
+        auto original_size = size();
+
+        reserve_back(n);
+        while (n < size()) pop_front();
+
+        try {
+            while (n > size()) emplace_front(t);
+        } catch (...) {
+            while (original_size < size()) pop_front();
+            throw;
+        }
+    }
 
     void reserve(size_type n) { reserve_back(n); }
 
@@ -345,7 +342,6 @@ public:
     }
 
     void shrink_to_fit() {
-        // FIXME: no effects on exception
         size_type n = size();
         if (capacity() > n && n > 0) reallocate(0, 0);
     }
@@ -400,7 +396,6 @@ public:
 
     // CORRECT MARKER
 
-    // There is no standards-compliant way of implementing an efficient emplace and insert
     template<class... Args>
     iterator emplace(const_iterator position, Args&&... args) {
         // TODO: move to unitialized memory broken
