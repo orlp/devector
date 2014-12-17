@@ -155,19 +155,13 @@ public:
     }
 
     devector(V&& other) noexcept : impl(std::move(other.impl)) {
-        impl.begin_storage = std::move(other.impl.begin_storage);
-        impl.end_storage = std::move(other.impl.end_storage);
-        impl.begin_cursor = std::move(other.impl.begin_cursor);
-        impl.end_cursor = std::move(other.impl.end_cursor);
+        impl.storage() = std::move(other.impl.storage());
         other.impl.null();
     }
 
     devector(V&& other, const Allocator& alloc) : impl(alloc) {
         if (impl.alloc() == other.impl.alloc()) {
-            impl.begin_storage = std::move(other.impl.begin_storage);
-            impl.end_storage = std::move(other.impl.end_storage);
-            impl.begin_cursor = std::move(other.impl.begin_cursor);
-            impl.end_cursor = std::move(other.impl.end_cursor);
+            impl.storage() = std::move(other.impl.storage());
         } else {
             init_range(std::move_iterator<iterator>(other.begin()),
                        std::move_iterator<iterator>(other.end()),
@@ -225,7 +219,7 @@ public:
     void assign(size_type n, const T& t) {
         reserve(n);
         while (size() > n) pop_back();
-        for (iterator it = begin(); it != end; ++it) *it = t;
+        for (iterator it = begin(); it != end(); ++it) *it = t;
         while (size() < n) push_back(t);
     }
 
@@ -318,10 +312,7 @@ public:
     void reserve(size_type n) { reserve_back(n); }
 
     void reserve(size_type new_front, size_type new_back) {
-        if (new_front > max_size() || new_back > max_size()) {
-            throw std::length_error("devector");
-        }
-
+        if (new_front > max_size() || new_back > max_size()) throw std::length_error("devector");
         if (capacity_front() >= new_front && capacity_back() >= new_back) return;
 
         reallocate(new_front - size(), new_back - size());
@@ -375,12 +366,21 @@ public:
     void push_back(const T& x)  { emplace_back(x); }
     void push_back(T&& x)       { emplace_back(std::move(x)); }
 
-    void pop_front() { alloc_traits::destroy(impl, std::addressof(*impl.begin_cursor++)); }
-    void pop_back()  { alloc_traits::destroy(impl, std::addressof(*--impl.end_cursor)); }
+    void pop_front() noexcept { alloc_traits::destroy(impl, std::addressof(*impl.begin_cursor++)); }
+    void pop_back()  noexcept { alloc_traits::destroy(impl, std::addressof(*--impl.end_cursor)); }
 
     template<class... Args>
     void emplace_front(Args&&... args) {
-        if (impl.begin_cursor == impl.begin_storage) req_storage_front();
+        if (impl.begin_cursor == impl.begin_storage) {
+            size_type n = size();
+            std::pair<size_type, size_type> space = grow_strategy(n, true);
+            size_type mem_req = n + space.first + space.second;
+
+            if (mem_req > capacity()) {
+                reallocate(space.first, space.second);
+            }
+        }
+        
         alloc_traits::construct(impl, std::addressof(*(begin() - 1)),
                                 std::forward<Args>(args)...);
         --impl.begin_cursor; // We do this after constructing for strong exception safety.
@@ -388,7 +388,7 @@ public:
 
     template<class... Args>
     void emplace_back(Args&&... args) {
-        if (impl.end_cursor == impl.end_storage) req_storage_back();
+        create_storage_back();
         alloc_traits::construct(impl, std::addressof(*end()),
                                 std::forward<Args>(args)...);
         ++impl.end_cursor; // We do this after constructing for strong exception safety.
@@ -481,35 +481,33 @@ public:
     }
 
     void clear() noexcept {
-        while (begin() != end()) {
-            try { pop_back(); } catch (...) { }
-        }
+        while (begin() != end()) pop_back();
     }
 
 private:
-    // Empty base class optimization.
-    struct impl_ : public Allocator {
-        impl_() noexcept(std::is_nothrow_default_constructible<Allocator>::value)
-        : Allocator() { }
-
-        impl_(const Allocator& alloc) noexcept
-        : Allocator(alloc) { }
-
-        impl_(Allocator&& alloc) noexcept
-        : Allocator(std::move(alloc)) { }
-
+    struct ImplStorage {
         void null() {
             begin_storage = end_storage = nullptr;
             begin_cursor = end_cursor = nullptr;
         }
 
-        Allocator& alloc() { return *this; }
-        const Allocator& alloc() const { return *this; }
-        
         pointer begin_storage; // storage[0]
         pointer end_storage; // storage[n] (one-past-end)
         pointer begin_cursor; // devector[0]
         pointer end_cursor; // devector[n] (one-past-end)
+    };
+
+    // Empty base class optimization.
+    struct Impl : ImplStorage, Allocator {
+        Impl() noexcept(std::is_nothrow_default_constructible<Allocator>::value) : Allocator() { }
+        Impl(const Allocator& alloc) noexcept : Allocator(alloc) { }
+        Impl(Allocator&& alloc) noexcept : Allocator(std::move(alloc)) { }
+
+        Allocator& alloc() { return *this; }
+        const Allocator& alloc() const { return *this; }
+        
+        Allocator& storage() { return *this; }
+        const Allocator& storage() const { return *this; }
     } impl;
 
     // Deallocates the stored memory. Does not leave the devector in a valid state!
@@ -524,7 +522,7 @@ private:
         deallocate();
     }
 
-    // Reallocate with space_front free space in the front, and space_back in the back.
+    // Reallocate with exactly space_front free space in the front, and space_back in the back.
     void reallocate(size_type space_front, size_type space_back) {
         size_type alloc_size = space_front + size() + space_back;
 
@@ -541,8 +539,88 @@ private:
         impl.end_cursor = impl.end_storage - space_back;
     }
 
-    // Fills first, last with constructed elements with args. Strong exception guarantee, cleans up
-    // if an exception occurs.
+    // Returns how much space should be put at each end given what the new size is and what side
+    // we're growing towards.
+    std::pair<size_type, size_type> grow_strategy(size_type n, bool front) {
+        size_type growing_end = n >= 16 ? n / 3 : n;
+
+        if (front) return std::make_pair(growing_end, (impl.end_storage - impl.end_cursor) / 2);
+        else       return std::make_pair((impl.begin_cursor - impl.begin_storage) / 2, growing_end);
+
+        //size_type new_mem = 
+    }
+
+    size_type recommend_capacity(size_type n) {
+        size_type mem = capacity();
+        return std::max(mem * (3 + (mem < 16)) / 2, n);
+    }
+
+    // Creates space so that capacity_front() is at least 4n/3.
+    ImplStorage create_space_front(size_type n) {
+        ImplStorage result;
+
+        if (mem) {
+            size_type free_other     = impl.end_storage - impl.end_cursor;
+            size_type new_free_this  = n >= 16 ? n / 3 : n;
+            size_type new_free_other = free_other / 2;
+            size_type mem_req        = new_free_this + n + new_free_other;
+
+            if (mem_req > mem) {
+                size_type new_mem = std::max(mem * (3 + (mem < 16)) / 2, mem_req);
+                result.begin_of_storage = alloc_traits::allocate(impl, new_mem);
+                result.end_of_storage   = result.begin_of_storage + new_mem;
+            } else {
+                result.begin_of_storage = impl.begin_of_storage;
+                result.end_of_storage   = impl.end_of_storage;
+            }
+
+            result.begin_cursor = result.begin_of_storage + new_free_this;
+            result.end_cursor   = result.end_of_storage - new_free_other;
+        } else {
+            result.begin_of_storage = alloc_traits::allocate(impl, 1);
+            result.end_of_storage   = result.begin_of_storage + 1;
+            result.begin_cursor     = result.end_of_storage;
+            result.end_cursor       = result.end_of_storage;
+        }
+
+        return result;
+    }
+
+    // Allocate memory with the at least the request amount of free space at the appropriate end.
+    ImplStorage allocate_front(size_type wanted_space) {
+        ImplStorage result;
+        size_type mem = capacity();
+
+        if (mem) {
+            size_type free_other = impl.end_storage - impl.end_cursor;
+            size_type n = size();
+            size_type new_free_this = n >= 16 ? n / 3 : n;
+
+            if (new_free_this < wanted_space) new_free_this = wanted_space;
+            
+            size_type new_free_other = free_other / 2;
+            if (new_free_this + n + new_free_other > mem) {
+                
+                
+
+            }
+
+            size_type new_mem = mem * (3 + (mem < 16)) / 2;
+        } else {
+            result.begin_of_storage = alloc_traits::allocate(impl, 1);
+            result.end_of_storage   = result.begin_of_storage + 1;
+            result.begin_cursor     = result.end_of_storage;
+            result.end_cursor       = result.end_of_storage;
+        }
+
+        return result;
+    }
+
+    ImplStorage allocate_back() {
+    }
+
+    // Fills [first, last) with constructed elements with args. Strong exception guarantee, cleans
+    // up if an exception occurs.
     template<class... Args>
     pointer strong_uninitialized_fill(pointer first, pointer last, Args&&... args) {
         pointer current = first;
@@ -641,10 +719,7 @@ private:
     void move_assign_propagate_dispatcher(V&& other, std::true_type) noexcept {
         destruct();
         impl.alloc() = std::move(other.impl.alloc());
-        impl.begin_storage = std::move(other.impl.begin_storage);
-        impl.end_storage = std::move(other.impl.end_storage);
-        impl.begin_cursor = std::move(other.impl.begin_cursor);
-        impl.end_cursor = std::move(other.impl.end_cursor);
+        impl.storage() = std::move(other.impl.storage());
         other.impl.null();
     }
 
@@ -681,37 +756,37 @@ private:
 
 // Comparison operators.
 template<class T, class Allocator>
-bool operator==(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
+inline bool operator==(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
     return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
 template<class T, class Allocator>
-bool operator< (const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
+inline bool operator< (const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
     return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 }
 
 template<class T, class Allocator>
-bool operator!=(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
+inline bool operator!=(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
     return !(lhs == rhs);
 }
 
 template<class T, class Allocator>
-bool operator> (const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
+inline bool operator> (const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
     return rhs < lhs;
 }
 
 template<class T, class Allocator>
-bool operator<=(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
+inline bool operator<=(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
     return !(rhs < lhs);
 }
 
 template<class T, class Allocator>
-bool operator>=(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
+inline bool operator>=(const devector<T, Allocator>& lhs, const devector<T, Allocator>& rhs) {
     return !(lhs < rhs);
 }
 
 template<class T, class Allocator>
-void swap(devector<T, Allocator>& lhs, devector<T, Allocator>& rhs)
+inline void swap(devector<T, Allocator>& lhs, devector<T, Allocator>& rhs)
 noexcept(noexcept(lhs.swap(rhs))) {
     lhs.swap(rhs);
 }
