@@ -260,20 +260,62 @@ public:
     void resize(size_type n, const T& t) { resize_back(n, t); }
 
     void resize_back(size_type n) {
-        // FIXME: no effects on exception
-        reserve(n);
-        while (n < size()) pop_back();
-        while (n > size()) emplace_back();
+        auto original_size = size();
+
+        reserve_back(n);
+        while (n < size()) {
+            try { pop_back(); } catch (...) { }
+        }
+
+        try {
+            while (n > size()) emplace_back();
+        } catch (...) {
+            while (original_size < size()) {
+                try { pop_back(); } catch (...) { }
+            }
+
+            throw;
+        }
     }
 
     void resize_back(size_type n, const T& t) {
-        // FIXME: no effects on exception
-        reserve(n);
-        while (n < size()) pop_back();
-        while (n > size()) emplace_back(t);
+        auto original_size = size();
+
+        reserve_back(n);
+        while (n < size()) {
+            try { pop_back(); } catch (...) { }
+        }
+
+        try {
+            while (n > size()) emplace_back(t);
+        } catch (...) {
+            while (original_size < size()) {
+                try { pop_back(); } catch (...) { }
+            }
+
+            throw;
+        }
     }
     
-    void resize_front(size_type n);
+    void resize_front(size_type n) {
+        auto original_size = size();
+
+        reserve_back(n);
+        while (n < size()) {
+            try { pop_front(); } catch (...) { }
+        }
+
+        try {
+            while (n > size()) emplace_front();
+        } catch (...) {
+            while (original_size < size()) {
+                try { pop_front(); } catch (...) { }
+            }
+
+            throw;
+        }
+    }
+
     void resize_front(size_type n, const T& t);
 
     void reserve(size_type n) { reserve_back(n); }

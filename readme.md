@@ -3,9 +3,11 @@
 
 Unlike `std::vector`, `devector` can have free capacity both before and after the elements. This
 enables efficient implementation of methods that modify the `devector` at the front. Anything a
-`std::vector` can do, a `devector` can as well. `devector`s available methods are a superset of those
-of `std::vector` with identical behaviour, barring a couple of iterator invalidation guarantees that
-differ. Also, `devector<bool>` is not specialized.
+`std::vector` can do, a `devector` can as well. `devector`s available methods are a superset of
+those of `std::vector` with identical behaviour, barring a couple of iterator invalidation
+guarantees that differ. The overhead for `devector` is one extra pointer per container.
+`sizeof(devector) == 4*sizeof(T*)` as opposed to the general implementation of `sizeof(std::vector)
+== 3*sizeof(T*)`. Also, `devector<bool>` is not specialized.
 
 Whenever `devector` requires more free space at an end it applies the following allocation strategy:
 
@@ -27,10 +29,10 @@ Whenever `devector` requires more free space at an end it applies the following 
 Note that not every request for more space results in an reallocation. If half of the free space of
 the other side is enough to satisfy the needs of this side the elements are simply moved.
 
-Constantly halving the amount of free space on the side that it is not needed on prevents wasted
-space. On top of that, in the worst case where you push at one end and pop at the other (FIFO),
-memory is bounded to _5n/3_. This is because free space on the output end is constantly
-halved, but only `size() / 3` free space is required on the input end.
+Constantly halving the amount of free space on the side that it is not used on prevents wasted
+space. In the worst case where you push at one end and pop at the other (FIFO), memory is bounded to
+_5n/3_. This is because free space on the output end is constantly halved, but only `size() / 3`
+free space is required on the input end.
 
 Typedefs
 --------
@@ -182,11 +184,9 @@ efficient by doing at most one reallocation.
         iterator insert(const_iterator position, InputIterator first, InputIterator last);
 
 All these operations have the same semantics as `std::vector`, except for the iterators/references
-that get invalidated by these operations. If `position - begin() < size() / 2` then the old elements
-are moved towards the front, otherwise they're moved towards the back. If the old elements are moved
-towards the front then only the iterators/references after the insertion point remain valid
-(including the past-the-end iterator). Vice versa, if the old elements are moved towards the back
-then only the iterators/references before the insertion point remain valid.
+that get invalidated by these operations. If `position - begin() < size() / 2` then only the
+iterators/references after the insertion point remain valid (including the past-the-end iterator).
+Otherwise only the iterators/references before the insertion point remain valid.
 
     iterator erase(const_iterator position);
 
@@ -201,7 +201,6 @@ Behaves the same as as `std::vector`, except for which iterators/references get 
 `first - begin() < end() - last` then all iterators and references at or before `last` are
 invalidated. Otherwise all iterators and references at or after (including `end()`) `first` are
 invalidated.
-
 
 Lastly, `devector` has lexical comparison operator overloads and `swap` defined in its namespace
 just like `std::vector`.
