@@ -262,7 +262,7 @@ public:
         try {
             while (n > size()) emplace_back();
         } catch (...) {
-            while (original_size < size()) pop_back();
+            while (size() > original_size) pop_back();
             throw;
         }
     }
@@ -276,7 +276,7 @@ public:
         try {
             while (n > size()) emplace_back(t);
         } catch (...) {
-            while (original_size < size()) pop_back();
+            while (size() > original_size) pop_back();
             throw;
         }
     }
@@ -290,7 +290,7 @@ public:
         try {
             while (n > size()) emplace_front();
         } catch (...) {
-            while (original_size < size()) pop_front();
+            while (size() > original_size) pop_front();
             throw;
         }
     }
@@ -304,7 +304,7 @@ public:
         try {
             while (n > size()) emplace_front(t);
         } catch (...) {
-            while (original_size < size()) pop_front();
+            while (size() > original_size) pop_front();
             throw;
         }
     }
@@ -373,11 +373,14 @@ public:
     void emplace_front(Args&&... args) {
         if (impl.begin_cursor == impl.begin_storage) {
             size_type n = size();
-            std::pair<size_type, size_type> space = grow_strategy(n, true);
-            size_type mem_req = n + space.first + space.second;
+            size_type space_front = n >= 16 ? n / 3 : n;
+            size_type space_back = (impl.end_storage - impl.end_cursor) / 2;
+            size_type mem_req = n + space_front + space_back;
 
-            if (mem_req > capacity()) {
-                reallocate(space.first, space.second);
+            if (mem_req > capacity()) 
+                reallocate(space_front, space_back);
+            } else {
+
             }
         }
         
@@ -546,8 +549,6 @@ private:
 
         if (front) return std::make_pair(growing_end, (impl.end_storage - impl.end_cursor) / 2);
         else       return std::make_pair((impl.begin_cursor - impl.begin_storage) / 2, growing_end);
-
-        //size_type new_mem = 
     }
 
     size_type recommend_capacity(size_type n) {

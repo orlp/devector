@@ -123,6 +123,10 @@ total size of allocated memory is `sizeof(T) * (capacity_front() + capacity_back
 
 Modifiers
 ---------
+The following functions are also required to be `MoveAssignable` in addition to the limitations put
+forth by `std::vector`: `emplace_back`, `push_back`, `emplace_front`, `push_front`, `resize`,
+`resize_back`, `resize_front`.
+
     
     void swap(devector<T>& other) noexcept(/* See below. */);
     void shrink_to_fit();
