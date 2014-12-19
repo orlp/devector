@@ -88,6 +88,22 @@ namespace detail {
                 detail::swap_adl_tests::is_adl_swap_noexcept<T, U>::value)
         )
     > {};
+ 
+    template<class Iterator>
+    using move_if_noexcept_iterator = typename std::conditional<  
+        !std::is_nothrow_move_constructible<
+            typename std::iterator_traits<Iterator>::value_type
+        >::value && std::is_copy_constructible<
+            typename std::iterator_traits<Iterator>::value_type
+        >::value,
+        Iterator,
+        std::move_iterator<Iterator>
+    >::type;
+     
+    template<class Iterator>
+    constexpr move_if_noexcept_iterator<Iterator> make_move_if_noexcept_iterator(Iterator i) {
+        return move_if_noexcept_iterator<Iterator>(i);
+    }
 }
 
 
@@ -250,64 +266,12 @@ public:
     size_type capacity_front() const noexcept { return impl.end_cursor  - impl.begin_storage; }
     size_type capacity_back()  const noexcept { return impl.end_storage - impl.begin_cursor; }
 
-    void resize(size_type n) { resize_back(n); }
-    void resize(size_type n, const T& t) { resize_back(n, t); }
-
-    void resize_back(size_type n) {
-        auto original_size = size();
-
-        reserve_back(n);
-        while (n < size()) pop_back();
-
-        try {
-            while (n > size()) emplace_back();
-        } catch (...) {
-            while (size() > original_size) pop_back();
-            throw;
-        }
-    }
-
-    void resize_back(size_type n, const T& t) {
-        auto original_size = size();
-
-        reserve_back(n);
-        while (n < size()) pop_back();
-
-        try {
-            while (n > size()) emplace_back(t);
-        } catch (...) {
-            while (size() > original_size) pop_back();
-            throw;
-        }
-    }
-    
-    void resize_front(size_type n) {
-        auto original_size = size();
-
-        reserve_back(n);
-        while (n < size()) pop_front();
-
-        try {
-            while (n > size()) emplace_front();
-        } catch (...) {
-            while (size() > original_size) pop_front();
-            throw;
-        }
-    }
-
-    void resize_front(size_type n, const T& t) {
-        auto original_size = size();
-
-        reserve_back(n);
-        while (n < size()) pop_front();
-
-        try {
-            while (n > size()) emplace_front(t);
-        } catch (...) {
-            while (size() > original_size) pop_front();
-            throw;
-        }
-    }
+    void resize(size_type n)                   { resize_back_impl(n);     }
+    void resize(size_type n, const T& t)       { resize_back_impl(n, t);  }
+    void resize_back(size_type n)              { resize_back_impl(n);     }
+    void resize_back(size_type n, const T& t)  { resize_back_impl(n, t);  }
+    void resize_front(size_type n)             { resize_front_impl(n);    }
+    void resize_front(size_type n, const T& t) { resize_front_impl(n, t); }
 
     void reserve(size_type n) { reserve_back(n); }
 
@@ -333,8 +297,11 @@ public:
     }
 
     void shrink_to_fit() {
-        size_type n = size();
-        if (capacity() > n && n > 0) reallocate(0, 0);
+        if (capacity() <= size()) return; 
+
+        V shrunk_devector(detail::make_move_if_noexcept_iterator(begin()),
+                          detail::make_move_if_noexcept_iterator(end()),
+                          get_allocator()).swap(*this);
     }
 
     bool empty() const noexcept { return impl.begin_cursor == impl.end_cursor; }
@@ -374,12 +341,25 @@ public:
         if (impl.begin_cursor == impl.begin_storage) {
             size_type n = size();
             size_type space_front = n >= 16 ? n / 3 : n;
-            size_type space_back = (impl.end_storage - impl.end_cursor) / 2;
+            size_type old_space_back = impl.end_storage - impl.end_cursor;
+            size_type space_back = old_space_back / 2;
             size_type mem_req = n + space_front + space_back;
 
-            if (mem_req > capacity()) 
+            if (mem_req > capacity())  {
                 reallocate(space_front, space_back);
             } else {
+                pointer new_storage_begin = alloc_traits::allocate(impl, mem_req);
+                pointer new_storage_end = new_storage_begin + mem_req;
+
+                iterator cur = impl.end_storage;
+
+                while (cur != begin()) {
+                    alloc_traits::construct(impl, std::addressof
+
+                }
+
+                strong_uninitialized_move(end(), InputIterator last, end());
+                
 
             }
         }
@@ -527,6 +507,10 @@ private:
 
     // Reallocate with exactly space_front free space in the front, and space_back in the back.
     void reallocate(size_type space_front, size_type space_back) {
+        // TODO It's possible that the user chose values such that the total new capacity needed is
+        // smaller than capacity(). In that case we should not request a new memory chunk from the
+        // allocator.
+
         size_type alloc_size = space_front + size() + space_back;
 
         pointer new_storage = alloc_traits::allocate(impl, alloc_size);
@@ -615,9 +599,6 @@ private:
         }
 
         return result;
-    }
-
-    ImplStorage allocate_back() {
     }
 
     // Fills [first, last) with constructed elements with args. Strong exception guarantee, cleans
@@ -751,6 +732,36 @@ private:
 
     void copy_assign_propagate_dispatcher(const V& other, std::false_type) {
         assign(other.begin(), other.end());
+    }
+
+    template<class... Args>
+    void resize_back_impl(size_type n, Args&&... args) {
+        auto original_size = size();
+
+        reserve_back(n);
+        while (n < size()) pop_back();
+
+        try {
+            while (n > size()) emplace_back(args...);
+        } catch (...) {
+            while (size() > original_size) pop_back();
+            throw;
+        }
+    }
+
+    template<class... Args>
+    void resize_front_impl(size_type n, Args&&... args) {
+        auto original_size = size();
+
+        reserve_back(n);
+        while (n < size()) pop_front();
+
+        try {
+            while (n > size()) emplace_front(args...);
+        } catch (...) {
+            while (size() > original_size) pop_front();
+            throw;
+        }
     }
 };
 
