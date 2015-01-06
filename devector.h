@@ -129,11 +129,7 @@ public:
     typedef std::reverse_iterator<const_iterator>  const_reverse_iterator;
 
     // Construct/copy/destroy.
-    ~devector() noexcept {
-        if (!impl.begin_storage) return;
-        destruct();
-        impl.begin_storage = nullptr;
-    }
+    ~devector() noexcept { destruct(); }
 
     devector() noexcept(std::is_nothrow_default_constructible<Allocator>::value) : impl() {
         impl.null();
@@ -144,14 +140,14 @@ public:
     explicit devector(size_type n, const Allocator& alloc = Allocator()) : impl(alloc) {
         impl.begin_storage = impl.begin_cursor = alloc_traits::allocate(impl, n);
         impl.end_storage = impl.end_cursor = impl.begin_storage + n;
-        try { strong_uninitialized_fill(impl.begin_cursor, impl.end_cursor); }
+        try { alloc_uninitialized_fill(impl.begin_cursor, impl.end_cursor); }
         catch (...) { deallocate(); throw; }
     }
 
     devector(size_type n, const T& value, const Allocator& alloc = Allocator()) : impl(alloc) {
         impl.begin_storage = impl.begin_cursor = alloc_traits::allocate(impl, n);
         impl.end_storage = impl.end_cursor = impl.begin_storage + n;
-        try { strong_uninitialized_fill(impl.begin_cursor, impl.end_cursor, value); }
+        try { alloc_uninitialized_fill(impl.begin_cursor, impl.end_cursor, value); }
         catch (...) { deallocate(); throw; }
     }
 
@@ -162,7 +158,7 @@ public:
     }
 
     devector(const V& other)
-    : impl(alloc_traits::select_on_container_copy_construction(other.impl)) {
+    : impl(alloc_traits::select_on_container_copy_construction(other.impl.alloc())) {
         init_range(other.begin(), other.end(), std::random_access_iterator_tag());
     }
 
@@ -170,7 +166,7 @@ public:
         init_range(other.begin(), other.end(), std::random_access_iterator_tag());
     }
 
-    devector(V&& other) noexcept : impl(std::move(other.impl)) {
+    devector(V&& other) noexcept : impl(std::move(other.impl.alloc())) {
         impl.storage() = std::move(other.impl.storage());
         other.impl.null();
     }
@@ -205,8 +201,7 @@ public:
         return *this;
     }
 
-    V& operator=(V&& other)
-    noexcept(alloc_traits::propagate_on_container_move_assignment::value) {
+    V& operator=(V&& other) noexcept(alloc_traits::propagate_on_container_move_assignment::value) {
         if (this != &other) {
             move_assign_propagate_dispatcher(
                 std::move(other),
@@ -299,9 +294,9 @@ public:
     void shrink_to_fit() {
         if (capacity() <= size()) return; 
 
-        V shrunk_devector(detail::make_move_if_noexcept_iterator(begin()),
-                          detail::make_move_if_noexcept_iterator(end()),
-                          get_allocator()).swap(*this);
+        V(detail::make_move_if_noexcept_iterator(begin()),
+          detail::make_move_if_noexcept_iterator(end()),
+          get_allocator()).swap(*this);
     }
 
     bool empty() const noexcept { return impl.begin_cursor == impl.end_cursor; }
@@ -334,51 +329,24 @@ public:
     void push_back(T&& x)       { emplace_back(std::move(x)); }
 
     void pop_front() noexcept { alloc_traits::destroy(impl, std::addressof(*impl.begin_cursor++)); }
-    void pop_back()  noexcept { alloc_traits::destroy(impl, std::addressof(*--impl.end_cursor)); }
+    void pop_back()  noexcept { alloc_traits::destroy(impl, std::addressof(*--impl.end_cursor));   }
 
     template<class... Args>
     void emplace_front(Args&&... args) {
-        if (impl.begin_cursor == impl.begin_storage) {
-            size_type n = size();
-            size_type space_front = n >= 16 ? n / 3 : n;
-            size_type old_space_back = impl.end_storage - impl.end_cursor;
-            size_type space_back = old_space_back / 2;
-            size_type mem_req = n + space_front + space_back;
-
-            if (mem_req > capacity())  {
-                reallocate(space_front, space_back);
-            } else {
-                pointer new_storage_begin = alloc_traits::allocate(impl, mem_req);
-                pointer new_storage_end = new_storage_begin + mem_req;
-
-                iterator cur = impl.end_storage;
-
-                while (cur != begin()) {
-                    alloc_traits::construct(impl, std::addressof
-
-                }
-
-                strong_uninitialized_move(end(), InputIterator last, end());
-                
-
-            }
-        }
-        
-        alloc_traits::construct(impl, std::addressof(*(begin() - 1)),
-                                std::forward<Args>(args)...);
+        assure_space_front(1);
+        alloc_traits::construct(impl, std::addressof(*(begin() - 1)), std::forward<Args>(args)...);
         --impl.begin_cursor; // We do this after constructing for strong exception safety.
     }
 
     template<class... Args>
     void emplace_back(Args&&... args) {
-        create_storage_back();
-        alloc_traits::construct(impl, std::addressof(*end()),
-                                std::forward<Args>(args)...);
+        assure_space_back(1);
+        alloc_traits::construct(impl, std::addressof(*end()), std::forward<Args>(args)...);
         ++impl.end_cursor; // We do this after constructing for strong exception safety.
     }
 
     // CORRECT MARKER
-
+    
     template<class... Args>
     iterator emplace(const_iterator position, Args&&... args) {
         // TODO: move to unitialized memory broken
@@ -388,7 +356,7 @@ public:
 
         if (dist_front < dist_back) {
             // TODO: do not move data twice
-            if (impl.begin_cursor == impl.begin_storage) req_storage_front();
+            //if (impl.begin_cursor == impl.begin_storage) req_storage_front();
 
             if (dist_front == 0) {
                 alloc_traits::construct(impl, std::addressof(*(begin() - 1)),
@@ -439,10 +407,10 @@ public:
 
         if (first - begin() < end() - last) {
             std::move_backward(begin(), first, first + n);
-            while (n--) alloc_traits::destroy(impl, std::addressof(*impl.begin_cursor++));
+            while (n--) pop_front();
         } else {
             std::move(last, end(), last - n);
-            while (n--) alloc_traits::destroy(impl, std::addressof(*--impl.end_cursor));
+            while (n--) pop_back();
         }
 
         return begin() + retpos;
@@ -457,10 +425,7 @@ public:
             swap(impl.alloc(), other.impl.alloc());
         }
 
-        swap(impl.begin_storage, other.impl.begin_storage);
-        swap(impl.end_storage, other.impl.end_storage);
-        swap(impl.begin_cursor, other.impl.begin_cursor);
-        swap(impl.end_cursor, other.impl.end_cursor);
+        swap(impl.storage(), other.impl.storage());
     }
 
     void clear() noexcept {
@@ -483,8 +448,8 @@ private:
     // Empty base class optimization.
     struct Impl : ImplStorage, Allocator {
         Impl() noexcept(std::is_nothrow_default_constructible<Allocator>::value) : Allocator() { }
-        Impl(const Allocator& alloc) noexcept : Allocator(alloc) { }
-        Impl(Allocator&& alloc) noexcept : Allocator(std::move(alloc)) { }
+        explicit Impl(const Allocator& alloc) noexcept : Allocator(alloc) { }
+        explicit Impl(Allocator&& alloc) noexcept : Allocator(std::move(alloc)) { }
 
         Allocator& alloc() { return *this; }
         const Allocator& alloc() const { return *this; }
@@ -498,9 +463,8 @@ private:
         alloc_traits::deallocate(impl, impl.begin_storage, capacity());
     }
 
-    // Deletes all elements and deallocates memory. Does not leave the devector in a valid state,
-    // unless an exception was thrown in an element destructor. If that's the case the 
-    void destruct() {
+    // Deletes all elements and deallocates memory. Does not leave the devector in a valid state.
+    void destruct() noexcept {
         clear();
         deallocate();
     }
@@ -516,8 +480,11 @@ private:
         pointer new_storage = alloc_traits::allocate(impl, alloc_size);
         pointer new_begin_cursor = new_storage + space_front;
 
-        try { strong_uninitialized_move(begin(), end(), new_begin_cursor); }
-        catch (...) { alloc_traits::deallocate(impl, new_storage, alloc_size); throw; }
+        try {
+            alloc_uninitialized_copy(detail::make_move_if_noexcept_iterator(begin()),
+                                      detail::make_move_if_noexcept_iterator(end()),
+                                      new_begin_cursor);
+        } catch (...) { alloc_traits::deallocate(impl, new_storage, alloc_size); throw; }
 
         destruct();
         impl.begin_storage = new_storage;
@@ -526,85 +493,97 @@ private:
         impl.end_cursor = impl.end_storage - space_back;
     }
 
-    // Returns how much space should be put at each end given what the new size is and what side
-    // we're growing towards.
-    std::pair<size_type, size_type> grow_strategy(size_type n, bool front) {
-        size_type growing_end = n >= 16 ? n / 3 : n;
 
-        if (front) return std::make_pair(growing_end, (impl.end_storage - impl.end_cursor) / 2);
-        else       return std::make_pair((impl.begin_cursor - impl.begin_storage) / 2, growing_end);
-    }
+    // Make sure there is space for at least n elements at the front of the devector. This may steal
+    // space from the back.
+    void assure_space_front(size_type n) {
+        if (impl.begin_cursor - impl.begin_storage >= difference_type(n)) return;
 
-    size_type recommend_capacity(size_type n) {
-        size_type mem = capacity();
-        return std::max(mem * (3 + (mem < 16)) / 2, n);
-    }
+        // Don't compute this multiple times.
+        size_type cap = capacity();
+        size_type sz = size();
 
-    // Creates space so that capacity_front() is at least 4n/3.
-    ImplStorage create_space_front(size_type n) {
-        ImplStorage result;
+        size_type space_back = (impl.end_storage - impl.end_cursor) / 2;
+        size_type sz_req = sz + n;
+        size_type space_front_req = sz_req >= 16 ? sz_req / 3 : sz_req;
+        size_type mem_req = sz_req + space_front_req + space_back;
 
-        if (mem) {
-            size_type free_other     = impl.end_storage - impl.end_cursor;
-            size_type new_free_this  = n >= 16 ? n / 3 : n;
-            size_type new_free_other = free_other / 2;
-            size_type mem_req        = new_free_this + n + new_free_other;
-
-            if (mem_req > mem) {
-                size_type new_mem = std::max(mem * (3 + (mem < 16)) / 2, mem_req);
-                result.begin_of_storage = alloc_traits::allocate(impl, new_mem);
-                result.end_of_storage   = result.begin_of_storage + new_mem;
-            } else {
-                result.begin_of_storage = impl.begin_of_storage;
-                result.end_of_storage   = impl.end_of_storage;
-            }
-
-            result.begin_cursor = result.begin_of_storage + new_free_this;
-            result.end_cursor   = result.end_of_storage - new_free_other;
+        if (mem_req > cap)  {
+            // Use exponential growth with factor 1.5 (2 for small sizes) if possible.
+            size_type alloc_size = cap * (3 + (cap < 16)) / 2;
+            if (mem_req > alloc_size) reallocate(space_front_req,              space_back);
+            else                      reallocate(alloc_size - sz - space_back, space_back);
         } else {
-            result.begin_of_storage = alloc_traits::allocate(impl, 1);
-            result.end_of_storage   = result.begin_of_storage + 1;
-            result.begin_cursor     = result.end_of_storage;
-            result.end_cursor       = result.end_of_storage;
-        }
+            // We have enough space already, we just have to move elements around.
+            pointer new_end_cursor = impl.end_storage - space_back;
+            size_type num_move = std::min<size_type>(new_end_cursor - impl.end_cursor, sz);
 
-        return result;
+            // We now have to move the elements into their new location. Some of the new
+            // locations are in uninitialized memory. This has to be handled seperately. 
+            alloc_uninitialized_copy(detail::make_move_if_noexcept_iterator(end() - num_move),
+                                     detail::make_move_if_noexcept_iterator(end()),
+                                     new_end_cursor - num_move);
+                
+            // Now move the rest.
+            std::copy_backward(detail::make_move_if_noexcept_iterator(begin()),
+                               detail::make_move_if_noexcept_iterator(end() - num_move),
+                               end());
+
+            // Update cursors and destruct the values at the old beginning.
+            while (num_move--) pop_front();
+            impl.begin_cursor = new_end_cursor - sz;
+            impl.end_cursor = new_end_cursor;
+        }
     }
 
-    // Allocate memory with the at least the request amount of free space at the appropriate end.
-    ImplStorage allocate_front(size_type wanted_space) {
-        ImplStorage result;
-        size_type mem = capacity();
 
-        if (mem) {
-            size_type free_other = impl.end_storage - impl.end_cursor;
-            size_type n = size();
-            size_type new_free_this = n >= 16 ? n / 3 : n;
+    // Make sure there is space for at least n elements at the back of the devector. This may steal
+    // space from the front.
+    void assure_space_back(size_type n) {
+        if (impl.end_storage - impl.end_cursor >= difference_type(n)) return;
+        
+        // Don't compute this multiple times.
+        size_type cap = capacity();
+        size_type sz = size();
 
-            if (new_free_this < wanted_space) new_free_this = wanted_space;
-            
-            size_type new_free_other = free_other / 2;
-            if (new_free_this + n + new_free_other > mem) {
-                
-                
+        size_type sz_req = size() + n;
+        size_type space_front = (impl.begin_cursor - impl.begin_storage) / 2;
+        size_type space_back_req = sz_req >= 16 ? sz_req / 3 : sz_req;
+        size_type mem_req = sz_req + space_front + space_back_req;
 
-            }
-
-            size_type new_mem = mem * (3 + (mem < 16)) / 2;
+        if (mem_req > cap)  {
+            // Use exponential growth with factor 1.5 (2 for small sizes) if possible.
+            size_type alloc_size = cap * (3 + (cap < 16)) / 2;
+            if (mem_req > alloc_size) reallocate(space_front, space_back_req);
+            else                      reallocate(space_front, alloc_size - sz - space_front);
         } else {
-            result.begin_of_storage = alloc_traits::allocate(impl, 1);
-            result.end_of_storage   = result.begin_of_storage + 1;
-            result.begin_cursor     = result.end_of_storage;
-            result.end_cursor       = result.end_of_storage;
-        }
+            // We have enough space already, we just have to move elements around.
+            pointer new_begin_cursor = impl.begin_storage + space_front;
+            size_type num_move =
+                std::min<size_type>(impl.begin_cursor - new_begin_cursor, sz);
 
-        return result;
+            // We now have to move the elements into their new location. Some of the new
+            // locations are in uninitialized memory. This has to be handled seperately. 
+            alloc_uninitialized_copy(detail::make_move_if_noexcept_iterator(begin()),
+                                     detail::make_move_if_noexcept_iterator(begin() + num_move),
+                                     new_begin_cursor);
+                
+            // Now move the rest.
+            std::copy(detail::make_move_if_noexcept_iterator(begin() + num_move),
+                      detail::make_move_if_noexcept_iterator(end()),
+                      new_begin_cursor + num_move);
+
+            // Update cursors and destruct the values at the old beginning.
+            while (num_move--) pop_back();
+            impl.begin_cursor = new_begin_cursor;
+            impl.end_cursor = new_begin_cursor + sz;
+        }
     }
 
     // Fills [first, last) with constructed elements with args. Strong exception guarantee, cleans
     // up if an exception occurs.
     template<class... Args>
-    pointer strong_uninitialized_fill(pointer first, pointer last, Args&&... args) {
+    pointer alloc_uninitialized_fill(pointer first, pointer last, Args&&... args) {
         pointer current = first;
 
         try {
@@ -622,7 +601,7 @@ private:
     // Copies from the range [first, last) into the uninitialized range starting at d_first. Strong
     // exception guarantee, cleans up if an exception occurs.
     template<class InputIterator>
-    pointer strong_uninitialized_copy(InputIterator first, InputIterator last, pointer d_first) {
+    pointer alloc_uninitialized_copy(InputIterator first, InputIterator last, pointer d_first) {
         pointer current = d_first;
 
         try {
@@ -637,27 +616,6 @@ private:
         return current;
     }
 
-    // Moves from the range [first, last) into the uninitialized range starting at d_first. Strong
-    // exception guarantee, cleans up if an exception occurs.
-    template<class InputIterator>
-    pointer strong_uninitialized_move(InputIterator first, InputIterator last, pointer d_first) {
-        pointer current = d_first;
-
-        try {
-            while (first != last) {
-                alloc_traits::construct(impl,
-                                        std::addressof(*current++),
-                                        std::move_if_noexcept(*first++));
-            }
-        } catch (...) {
-            while (d_first != current) alloc_traits::destroy(impl, std::addressof(*d_first++));
-            throw;
-        }
-
-        return current;
-    }
-
-
     // Initializes the devector with copies from [first, last). Strong exception guarantee.
     template<class InputIterator>
     void init_range(InputIterator first, InputIterator last, std::random_access_iterator_tag) {
@@ -666,7 +624,9 @@ private:
         if (n > 0) {
             impl.begin_storage = impl.begin_cursor = alloc_traits::allocate(impl, n);
             impl.end_storage = impl.end_cursor = impl.begin_storage + n;
-            strong_uninitialized_copy(first, last, impl.begin_cursor);
+            alloc_uninitialized_copy(first, last, impl.begin_cursor);
+        } else {
+            impl.null();
         }
     }
 
