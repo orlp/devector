@@ -1,3 +1,5 @@
+## Warning: `devector` is not finished yet and the implementation is currently an incomplete WIP.
+
 `devector` - a resizable contiguous sequence container with fast appends on either end
 ======================================================================================
 
